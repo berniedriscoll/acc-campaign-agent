@@ -49,10 +49,11 @@ st.markdown('<p class="subhead">Adobe Campaign Classic · Multi-Agent Pipeline �
 st.divider()
 
 # ── Session state ─────────────────────────────────────────────────────────────
-if "package"      not in st.session_state: st.session_state.package      = None
-if "stages_html"  not in st.session_state: st.session_state.stages_html  = []
-if "variant_id"   not in st.session_state: st.session_state.variant_id   = "gold_high"
-if "verdict"      not in st.session_state: st.session_state.verdict      = {"verdict": "pending", "notes": ""}
+if "package"         not in st.session_state: st.session_state.package         = None
+if "stages_html"     not in st.session_state: st.session_state.stages_html     = []
+if "variant_id"      not in st.session_state: st.session_state.variant_id      = "gold_high"
+if "verdict"         not in st.session_state: st.session_state.verdict         = {"verdict": "pending", "notes": ""}
+if "hitl_stage_idx"  not in st.session_state: st.session_state.hitl_stage_idx  = None
 
 # ── Presets ───────────────────────────────────────────────────────────────────
 PRESETS = {
@@ -187,11 +188,17 @@ if submitted:
     audience_ctx = get_audience_context(structured)
     contract = validate_signals(structured.targeting_signals, available_fields=audience_ctx.get("available_fields", []))
     if contract["unknown_signals"]:
+        # Hard error — LLM hallucinated a signal name
         structured.targeting_signals = contract["all_signals"]
+        s2_status = "warn"
+        s2_detail = f"Unknown signals removed: {contract['unknown_signals']} &nbsp;|&nbsp; {len(structured.targeting_signals)} signals active"
+    else:
+        # missing_fields just means local demo data doesn't match ACC schema — expected
+        s2_status = "pass"
+        schema_note = " &nbsp;·&nbsp; <em>field check skipped (non-ACC data source)</em>" if contract["missing_fields"] else ""
+        s2_detail  = f"{len(structured.targeting_signals)} signals valid{schema_note}"
     targeting_sql = build_targeting_sql(structured.targeting_signals, geo=brief.property_location)
-    push_stage("Stage 2 · Retrieval + Contract",
-               "warn" if contract["missing_fields"] else "pass",
-               f"SQL built &nbsp;|&nbsp; {len(structured.targeting_signals)} signals active")
+    push_stage("Stage 2 · Retrieval + Contract", s2_status, s2_detail)
 
     push_stage("Stage 3 · Content Strategist", "run")
     angles = content_strategist.run(structured, n_angles=n_angles)
@@ -244,6 +251,7 @@ if submitted:
                f"Gate FAILED — {len(package.gate_report.get('blocking_issues', []))} blocking issue(s) — awaiting HITL override")
 
     push_stage("Stage 9 · HITL Approval", "warn", "Awaiting reviewer decision below ↓")
+    st.session_state.hitl_stage_idx = len(stages) - 1   # remember its position
 
     package = compile_and_save(package)
     push_stage("Stage 10 · Compile + Validate", "pass",
@@ -338,7 +346,24 @@ with p_hitl:
         package.approved_by   = reviewer
         package.approved_at   = verdict_obj["approved_at"]
         package.hitl_notes    = notes
-        # Update compiled JSON
+
+        # Update Stage 9 in the pipeline log to reflect the actual decision
+        v_icon   = {"approved": "✅", "rejected": "❌", "needs_revision": "⚠️"}.get(verdict_choice, "•")
+        v_css    = {"approved": "stage-pass", "rejected": "stage-fail", "needs_revision": "stage-warn"}.get(verdict_choice, "stage-box")
+        v_detail = f"Verdict: <strong>{verdict_choice}</strong> by {reviewer} at {verdict_obj['approved_at']}"
+        if notes:
+            v_detail += f"<br><em>{notes}</em>"
+        updated_entry = (
+            f'<div class="stage-box {v_css}">'
+            f'{v_icon} <strong>Stage 9 · HITL Approval</strong>'
+            f'<br><span style="color:#555;font-size:12px">{v_detail}</span>'
+            f'</div>'
+        )
+        idx = st.session_state.get("hitl_stage_idx")
+        if idx is not None and idx < len(st.session_state.stages_html):
+            st.session_state.stages_html[idx] = updated_entry
+
+        # Update compiled JSON with verdict
         from python.compiler import compile_and_save
         package = compile_and_save(package)
         st.session_state.package = package
