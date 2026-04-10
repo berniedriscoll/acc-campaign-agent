@@ -408,8 +408,8 @@ with p_preview:
     if "@@" in package.compiled_html or "{{" in package.compiled_html:
         st.caption("`@@marriottDeliveryPersonalizedHeader@@`")
 
-    tab_sim, tab_raw, tab_angles, tab_workflow = st.tabs([
-        "Simulated Preview", "Raw Tokens (ACC)", "Angles & Jury", "Workflow"
+    tab_sim, tab_raw, tab_html, tab_xml, tab_angles, tab_workflow = st.tabs([
+        "Simulated Preview", "Raw Tokens (ACC)", "HTML Source", "Workflow XML", "Angles & Jury", "Workflow"
     ])
 
     with tab_sim:
@@ -419,10 +419,33 @@ with p_preview:
         st.caption("Tokens highlighted: `{{handlebars}}` in yellow · `@@ACC tokens@@` in orange")
         components.html(raw_token_html, height=550, scrolling=True)
 
+    with tab_html:
+        safe_name = package.brief.raw.campaign_name.replace(" ", "_")
+        st.download_button(
+            label="⬇️  Download email.html",
+            data=package.compiled_html,
+            file_name=f"{safe_name}_email.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+        st.caption(f"Saved on disk: `{package.output_path.replace('_package.json','_email.html')}`")
+        st.divider()
+        st.code(package.compiled_html, language="html")
+
+    with tab_xml:
+        safe_name = package.brief.raw.campaign_name.replace(" ", "_")
+        st.download_button(
+            label="⬇️  Download workflow.xml",
+            data=package.compiled_xml,
+            file_name=f"{safe_name}_workflow.xml",
+            mime="application/xml",
+            use_container_width=True,
+        )
+        st.caption(f"Saved on disk: `{package.output_path.replace('_package.json','_workflow.xml')}`")
+        st.divider()
+        st.code(package.compiled_xml, language="xml")
+
     with tab_angles:
-        for a in package.brief.__class__.__mro__:
-            pass  # just need angles from jury — stored on package
-        # Re-surface angles from content strategist via brief metadata
         st.markdown(f"**Winning Angle: [{package.selected_angle.name}]**")
         st.markdown(f"*{package.selected_angle.hook}*")
         st.markdown(f"{package.selected_angle.rationale}")
