@@ -49,11 +49,12 @@ st.markdown('<p class="subhead">Adobe Campaign Classic · Multi-Agent Pipeline �
 st.divider()
 
 # ── Session state ─────────────────────────────────────────────────────────────
-if "package"         not in st.session_state: st.session_state.package         = None
-if "stages_html"     not in st.session_state: st.session_state.stages_html     = []
-if "variant_id"      not in st.session_state: st.session_state.variant_id      = "gold_high"
-if "verdict"         not in st.session_state: st.session_state.verdict         = {"verdict": "pending", "notes": ""}
-if "hitl_stage_idx"  not in st.session_state: st.session_state.hitl_stage_idx  = None
+if "package"            not in st.session_state: st.session_state.package            = None
+if "stages_html"        not in st.session_state: st.session_state.stages_html        = []
+if "variant_id"         not in st.session_state: st.session_state.variant_id         = "gold_high"
+if "verdict"            not in st.session_state: st.session_state.verdict            = {"verdict": "pending", "notes": ""}
+if "hitl_stage_idx"     not in st.session_state: st.session_state.hitl_stage_idx     = None
+if "compile_stage_idx"  not in st.session_state: st.session_state.compile_stage_idx  = None
 
 # ── Presets ───────────────────────────────────────────────────────────────────
 PRESETS = {
@@ -168,94 +169,106 @@ if submitted:
     from python.gate_aggregator import apply_gate
     from python.compiler        import compile_and_save
 
-    stages = []
+    stages      = []   # ordered list of rendered HTML strings
+    stage_index = {}   # name -> index in stages list, so updates replace not append
 
     def push_stage(name, status="run", detail=""):
-        icon = {"run":"⏳","pass":"✅","fail":"❌","warn":"⚠️"}.get(status,"•")
+        icon = {"run":"⏳","pass":"✅","fail":"❌","warn":"⚠️"}.get(status, "•")
         css  = f"stage-box stage-{status}"
         detail_html = f"<br><span style='color:#555;font-size:12px'>{detail}</span>" if detail else ""
-        stages.append(f'<div class="{css}">{icon} <strong>{name}</strong>{detail_html}</div>')
+        html = f'<div class="{css}">{icon} <strong>{name}</strong>{detail_html}</div>'
+        if name in stage_index:
+            stages[stage_index[name]] = html   # replace existing entry
+        else:
+            stage_index[name] = len(stages)
+            stages.append(html)
         pipeline_area.markdown("\n".join(stages), unsafe_allow_html=True)
 
     campaign_id = f"camp_{uuid.uuid4().hex[:8]}"
 
-    push_stage("Stage 1 · Brief Strategist", "run")
-    structured = brief_strategist.run(brief)
-    push_stage("Stage 1 · Brief Strategist", "pass",
-               f"Intent: {structured.business_intent} &nbsp;|&nbsp; Signals: {', '.join(structured.targeting_signals)}")
+    try:
+        push_stage("Stage 1 · Brief Strategist", "run")
+        structured = brief_strategist.run(brief)
+        push_stage("Stage 1 · Brief Strategist", "pass",
+                   f"Intent: {structured.business_intent} &nbsp;|&nbsp; Signals: {', '.join(structured.targeting_signals)}")
 
-    push_stage("Stage 2 · Retrieval + Contract", "run")
-    audience_ctx = get_audience_context(structured)
-    contract = validate_signals(structured.targeting_signals, available_fields=audience_ctx.get("available_fields", []))
-    if contract["unknown_signals"]:
-        # Hard error — LLM hallucinated a signal name
-        structured.targeting_signals = contract["all_signals"]
-        s2_status = "warn"
-        s2_detail = f"Unknown signals removed: {contract['unknown_signals']} &nbsp;|&nbsp; {len(structured.targeting_signals)} signals active"
-    else:
-        # missing_fields just means local demo data doesn't match ACC schema — expected
-        s2_status = "pass"
-        schema_note = " &nbsp;·&nbsp; <em>field check skipped (non-ACC data source)</em>" if contract["missing_fields"] else ""
-        s2_detail  = f"{len(structured.targeting_signals)} signals valid{schema_note}"
-    targeting_sql = build_targeting_sql(structured.targeting_signals, geo=brief.property_location)
-    push_stage("Stage 2 · Retrieval + Contract", s2_status, s2_detail)
+        push_stage("Stage 2 · Retrieval + Contract", "run")
+        audience_ctx = get_audience_context(structured)
+        contract = validate_signals(structured.targeting_signals, available_fields=audience_ctx.get("available_fields", []))
+        if contract["unknown_signals"]:
+            structured.targeting_signals = contract["all_signals"]
+            s2_status = "warn"
+            s2_detail = f"Unknown signals removed: {contract['unknown_signals']} &nbsp;|&nbsp; {len(structured.targeting_signals)} signals active"
+        else:
+            s2_status = "pass"
+            schema_note = " &nbsp;·&nbsp; <em>field check skipped (non-ACC data source)</em>" if contract["missing_fields"] else ""
+            s2_detail  = f"{len(structured.targeting_signals)} signals valid{schema_note}"
+        targeting_sql = build_targeting_sql(structured.targeting_signals, geo=brief.property_location)
+        push_stage("Stage 2 · Retrieval + Contract", s2_status, s2_detail)
 
-    push_stage("Stage 3 · Content Strategist", "run")
-    angles = content_strategist.run(structured, n_angles=n_angles)
-    push_stage("Stage 3 · Content Strategist", "pass",
-               " &nbsp;·&nbsp; ".join(f"[{a.name}]" for a in angles))
+        push_stage("Stage 3 · Content Strategist", "run")
+        angles = content_strategist.run(structured, n_angles=n_angles)
+        push_stage("Stage 3 · Content Strategist", "pass",
+                   " &nbsp;·&nbsp; ".join(f"[{a.name}]" for a in angles))
 
-    push_stage("Stage 4 · Angle Jury (3 parallel votes)", "run")
-    jury = angle_jury.run(structured, angles)
-    winning = jury["winning_angle"]
-    tally_str = " | ".join(f"{k}: {v}" for k, v in jury["vote_tally"].items())
-    push_stage("Stage 4 · Angle Jury", "pass",
-               f"Winner: <strong>[{winning.name}]</strong> — {winning.hook} &nbsp;|&nbsp; {tally_str}")
+        push_stage("Stage 4 · Angle Jury", "run")
+        jury = angle_jury.run(structured, angles)
+        winning = jury["winning_angle"]
+        tally_str = " | ".join(f"{k}: {v}" for k, v in jury["vote_tally"].items())
+        push_stage("Stage 4 · Angle Jury", "pass",
+                   f"Winner: <strong>[{winning.name}]</strong> — {winning.hook} &nbsp;|&nbsp; {tally_str}")
 
-    push_stage("Stage 5 · Workflow Architect + Content Author (parallel)", "run")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        wf_f = ex.submit(workflow_architect.run, structured, winning)
-        ct_f = ex.submit(content_author.run, structured, winning)
-        workflow = wf_f.result()
-        content  = ct_f.result()
-    workflow.targeting_sql = targeting_sql
-    push_stage("Stage 5 · Workflow + Content", "pass",
-               f"Workflow: {workflow.workflow_id} ({len(workflow.steps)} steps) &nbsp;|&nbsp; Subject: <em>{content.subject_line}</em>")
+        push_stage("Stage 5 · Workflow Architect + Content Author", "run")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            wf_f = ex.submit(workflow_architect.run, structured, winning)
+            ct_f = ex.submit(content_author.run, structured, winning)
+            workflow = wf_f.result()
+            content  = ct_f.result()
+        workflow.targeting_sql = targeting_sql
+        push_stage("Stage 5 · Workflow Architect + Content Author", "pass",
+                   f"Workflow: {workflow.workflow_id} ({len(workflow.steps)} steps) &nbsp;|&nbsp; Subject: <em>{content.subject_line}</em>")
 
-    push_stage("Stage 6 · Lint", "run")
-    workflow = wf_lint(workflow)
-    content  = ct_lint(content)
-    push_stage("Stage 6 · Lint",
-               "pass" if workflow.lint_passed and content.lint_passed else "warn",
-               f"Workflow: {'PASS' if workflow.lint_passed else 'FAIL'} &nbsp;|&nbsp; Content: {'PASS' if content.lint_passed else 'FAIL'}"
-               + (f" — {content.lint_issues[0]}" if content.lint_issues else ""))
+        push_stage("Stage 6 · Lint", "run")
+        workflow = wf_lint(workflow)
+        content  = ct_lint(content)
+        lint_ok  = workflow.lint_passed and content.lint_passed
+        push_stage("Stage 6 · Lint",
+                   "pass" if lint_ok else "warn",
+                   f"Workflow: {'PASS' if workflow.lint_passed else 'FAIL'} &nbsp;|&nbsp; Content: {'PASS' if content.lint_passed else 'FAIL'}"
+                   + (f" — {content.lint_issues[0]}" if content.lint_issues else ""))
 
-    push_stage("Stage 7 · Critics (parallel)", "run")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        wf_cf = ex.submit(workflow_critic.run, structured, workflow)
-        ct_cf = ex.submit(content_critic.run, structured, winning, content)
-        workflow = wf_cf.result()
-        content  = ct_cf.result()
-    push_stage("Stage 7 · Critics", "pass",
-               f"Workflow critic: {workflow.critic_score}/100 &nbsp;|&nbsp; Content critic: {content.critic_score}/100")
+        push_stage("Stage 7 · Critics", "run")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            wf_cf = ex.submit(workflow_critic.run, structured, workflow)
+            ct_cf = ex.submit(content_critic.run, structured, winning, content)
+            workflow = wf_cf.result()
+            content  = ct_cf.result()
+        push_stage("Stage 7 · Critics", "pass",
+                   f"Workflow critic: {workflow.critic_score}/100 &nbsp;|&nbsp; Content critic: {content.critic_score}/100")
 
-    push_stage("Stage 8 · Gate Aggregator", "run")
-    package = CampaignPackage(
-        campaign_id=campaign_id, brief=structured,
-        selected_angle=winning, workflow=workflow, content=content,
-    )
-    package = apply_gate(package)
-    push_stage("Stage 8 · Gate Aggregator",
-               "pass" if package.gate_passed else "warn",
-               "Gate PASSED" if package.gate_passed else
-               f"Gate FAILED — {len(package.gate_report.get('blocking_issues', []))} blocking issue(s) — awaiting HITL override")
+        push_stage("Stage 8 · Gate Aggregator", "run")
+        package = CampaignPackage(
+            campaign_id=campaign_id, brief=structured,
+            selected_angle=winning, workflow=workflow, content=content,
+        )
+        package = apply_gate(package)
+        push_stage("Stage 8 · Gate Aggregator",
+                   "pass" if package.gate_passed else "warn",
+                   "Gate PASSED" if package.gate_passed else
+                   f"Gate FAILED — {len(package.gate_report.get('blocking_issues', []))} blocking issue(s) — awaiting HITL override")
 
-    push_stage("Stage 9 · HITL Approval", "warn", "Awaiting reviewer decision below ↓")
-    st.session_state.hitl_stage_idx = len(stages) - 1   # remember its position
+        # Stage 9 stays pending until user submits verdict in the panel below
+        push_stage("Stage 9 · HITL Approval", "warn", "Awaiting reviewer decision below ↓")
+        st.session_state.hitl_stage_idx = stage_index["Stage 9 · HITL Approval"]
 
-    package = compile_and_save(package)
-    push_stage("Stage 10 · Compile + Validate", "pass",
-               f"XML + HTML compiled &nbsp;|&nbsp; {os.path.basename(package.output_path)}")
+        # Stage 10 placeholder — will update after HITL verdict is submitted
+        push_stage("Stage 10 · Compile + Validate", "run", "Waiting for HITL approval…")
+        st.session_state.compile_stage_idx = stage_index["Stage 10 · Compile + Validate"]
+
+    except Exception as e:
+        push_stage(f"Pipeline Error", "fail", str(e))
+        st.session_state.stages_html = stages
+        st.rerun()
 
     st.session_state.package      = package
     st.session_state.stages_html  = stages
@@ -347,25 +360,41 @@ with p_hitl:
         package.approved_at   = verdict_obj["approved_at"]
         package.hitl_notes    = notes
 
-        # Update Stage 9 in the pipeline log to reflect the actual decision
+        # Update Stage 9 in pipeline log
         v_icon   = {"approved": "✅", "rejected": "❌", "needs_revision": "⚠️"}.get(verdict_choice, "•")
         v_css    = {"approved": "stage-pass", "rejected": "stage-fail", "needs_revision": "stage-warn"}.get(verdict_choice, "stage-box")
         v_detail = f"Verdict: <strong>{verdict_choice}</strong> by {reviewer} at {verdict_obj['approved_at']}"
         if notes:
             v_detail += f"<br><em>{notes}</em>"
-        updated_entry = (
+        s9_html = (
             f'<div class="stage-box {v_css}">'
             f'{v_icon} <strong>Stage 9 · HITL Approval</strong>'
             f'<br><span style="color:#555;font-size:12px">{v_detail}</span>'
             f'</div>'
         )
-        idx = st.session_state.get("hitl_stage_idx")
-        if idx is not None and idx < len(st.session_state.stages_html):
-            st.session_state.stages_html[idx] = updated_entry
+        idx9 = st.session_state.get("hitl_stage_idx")
+        if idx9 is not None and idx9 < len(st.session_state.stages_html):
+            st.session_state.stages_html[idx9] = s9_html
 
-        # Update compiled JSON with verdict
+        # Run Stage 10 now that HITL is resolved
         from python.compiler import compile_and_save
-        package = compile_and_save(package)
+        if verdict_choice == "approved":
+            package = compile_and_save(package)
+            s10_html = (
+                '<div class="stage-box stage-pass">✅ <strong>Stage 10 · Compile + Validate</strong>'
+                f'<br><span style="color:#555;font-size:12px">XML + HTML compiled &nbsp;|&nbsp; {os.path.basename(package.output_path)}</span>'
+                '</div>'
+            )
+        else:
+            s10_html = (
+                f'<div class="stage-box stage-fail">❌ <strong>Stage 10 · Compile + Validate</strong>'
+                f'<br><span style="color:#555;font-size:12px">Skipped — campaign {verdict_choice}</span>'
+                '</div>'
+            )
+        idx10 = st.session_state.get("compile_stage_idx")
+        if idx10 is not None and idx10 < len(st.session_state.stages_html):
+            st.session_state.stages_html[idx10] = s10_html
+
         st.session_state.package = package
         st.rerun()
 
